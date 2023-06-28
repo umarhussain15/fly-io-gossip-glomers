@@ -12,16 +12,13 @@ func main() {
 
 	node := maelstrom.NewNode()
 
-	logs := map[string]map[int64]float64{}
+	logs := sync.Map{}
 
-	logsSortedKeys := map[string][]int64{}
+	logsSortedKeys := sync.Map{}
 
-	commitOffsets := map[string]int64{}
+	commitOffsets := sync.Map{}
 
 	//offSets := map[string]int64{}
-
-	var mutexLogs = &sync.RWMutex{}
-	var mutexOffsets = &sync.RWMutex{}
 
 	node.Handle("send", func(msg maelstrom.Message) error {
 		var body map[string]any
@@ -31,26 +28,19 @@ func main() {
 		}
 		key := body["key"].(string)
 		value := body["msg"].(float64)
-		nextOffset := int64(len(logsSortedKeys[key]))
+		actual, _ := logsSortedKeys.LoadOrStore(key, []int64{0})
+		nextOffset := int64(len(actual.([]int64)))
 
-		mutexLogs.Lock()
-		if keyLog, ok := logs[key]; ok {
-			keyLog[nextOffset] = value
-		} else {
-			logs[key] = map[int64]float64{
-				nextOffset: value,
-			}
+		//mutexLogs.Lock()
+		keyLog := sync.Map{}
+		keyLog.Store(nextOffset, value)
+		load, ok := logs.LoadOrStore(key, keyLog)
+		if ok {
+			s := load.(sync.Map)
+			s.Store(key, value)
 		}
 
-		if _, ok := logsSortedKeys[key]; ok {
-			//len(logsSortedKeys[key])
-			logsSortedKeys[key] = append(logsSortedKeys[key], nextOffset)
-		} else {
-			logsSortedKeys[key] = []int64{
-				0,
-			}
-		}
-		mutexLogs.Unlock()
+		actual = append(actual.([]int64), nextOffset)
 
 		delete(body, "key")
 		delete(body, "msg")
@@ -68,27 +58,37 @@ func main() {
 		}
 		pollOffsets := body["offsets"].(map[string]any)
 
-		results := map[string][][]int64{}
-		mutexLogs.Lock()
+		results := map[string][][]float64{}
+		//mutexLogs.Lock()
 		for key, start := range pollOffsets {
-			startOffset := int64(start.(float64))
+			startOffset := start.(float64)
 			if _, ok := results[key]; ok {
 
 			} else {
-				results[key] = [][]int64{}
+				results[key] = [][]float64{}
 			}
-			if _, ok := logsSortedKeys[key]; ok {
-				if startOffset < int64(len(logsSortedKeys[key])) {
-					for i := startOffset; i < startOffset+4 || i < int64(len(logsSortedKeys[key])); i++ {
-						results[key] = append(results[key], []int64{
-							i,
-							int64(logs[key][startOffset]),
-						})
+			value, ok := logsSortedKeys.Load(key)
+			if ok {
+				arrLength := float64(len(value.([]int64)))
+				keyLogs, ok := logs.Load(key)
+				if ok {
+
+					if startOffset < arrLength {
+						for i := startOffset; i < startOffset+4 || i < arrLength; i++ {
+							s := keyLogs.(sync.Map)
+							loaded, ok := s.Load(i)
+							if ok {
+								results[key] = append(results[key], []float64{
+									i,
+									loaded.(float64),
+								})
+							}
+						}
 					}
+
 				}
 			}
 		}
-		mutexLogs.Unlock()
 
 		delete(body, "offsets")
 		body["msgs"] = results
@@ -105,11 +105,9 @@ func main() {
 		}
 		offsets := body["offsets"].(map[string]any)
 
-		mutexOffsets.Lock()
 		for key, offset := range offsets {
-			commitOffsets[key] = int64(offset.(float64))
+			commitOffsets.Store(key, offset)
 		}
-		mutexOffsets.Unlock()
 		delete(body, "offsets")
 		body["type"] = "commit_offsets_ok"
 
@@ -125,11 +123,10 @@ func main() {
 		keys := body["keys"].([]any)
 		results := map[string]any{}
 		for _, key := range keys {
-			mutexOffsets.Lock()
-			if _, ok := commitOffsets[key.(string)]; ok {
-				results[key.(string)] = commitOffsets[key.(string)]
+			value, ok := commitOffsets.Load(key.(string))
+			if ok {
+				results[key.(string)] = value
 			}
-			mutexOffsets.Unlock()
 		}
 
 		delete(body, "keys")
